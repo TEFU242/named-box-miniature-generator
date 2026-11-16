@@ -1,0 +1,644 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RoofLamp 屋頂燈罩生成器</title>
+<style>
+:root{--bg:#0b0f17;--panel:#111723;--line:#1f2a3d;--txt:#d7e2f0;--mut:#7f90a8;--cy:#00e5ff;--gr:#00f5a0}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.5 -apple-system,"PingFang TC",sans-serif;display:flex;height:100vh}
+#panel{width:330px;background:var(--panel);border-right:1px solid var(--line);padding:16px;overflow:auto}
+h1{font-size:16px;margin:0 0 12px;color:var(--cy)}
+h2{font-size:12px;color:var(--mut);margin:18px 0 6px;letter-spacing:.1em}
+.row{display:grid;grid-template-columns:78px 1fr 64px;gap:8px;align-items:center;margin:6px 0}
+.row label{color:var(--mut)}
+input[type=range]{width:100%;accent-color:var(--cy)}
+input[type=number],select{background:#0b0f17;color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:4px;width:100%}
+select{grid-column:2/4}
+.seg{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.seg button{background:#0b0f17;color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:6px 0;cursor:pointer}
+.seg button.on{border-color:var(--cy);color:var(--cy)}
+#exportStep,#export{margin-top:12px;width:100%;padding:10px;background:var(--gr);color:#04170f;border:0;border-radius:8px;font-weight:700;cursor:pointer}
+#export.sec{margin-top:8px;background:#0b0f17;color:var(--mut);border:1px solid var(--line);font-weight:400}
+.seg{margin-bottom:4px}
+#info{margin-top:14px;font-size:12px;color:var(--mut);white-space:pre-line}
+#info b{color:var(--gr)}
+#view{flex:1;position:relative}
+canvas{display:block}
+#dim{position:absolute;left:12px;top:10px;color:var(--cy);font-size:13px;z-index:2}
+#vsw{position:absolute;right:12px;top:10px;z-index:2;display:flex;gap:6px}
+#vsw button{background:#0b0f17;color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:5px 10px;cursor:pointer}
+#vsw button.on{border-color:var(--cy);color:var(--cy)}
+#flat{position:absolute;inset:0;background:#f4f6f8;overflow:auto;padding:44px 12px 12px}
+#flat svg{width:100%;height:auto;max-height:100%}
+.lb{width:100%;padding:9px;background:#0b0f17;color:var(--cy);border:1px solid var(--cy);border-radius:8px;cursor:pointer;font-weight:700}
+#laserBtns{display:grid}
+</style>
+</head>
+<body>
+<div id="panel">
+  <h1>RoofLamp 屋頂燈罩生成器</h1>
+  <div class="seg" style="grid-template-columns:1fr 1fr" id="modeSeg"></div>
+  <div id="lampUI">
+  <h2>屋頂形式</h2>
+  <div class="seg" id="roofSeg"></div>
+  <h2>外形尺寸 (mm)</h2>
+  <div id="dims"></div>
+  <h2>最終製作方式</h2>
+  <div class="seg" style="grid-template-columns:1fr 1fr 1fr" id="printSeg"></div>
+  </div>
+  <div id="plateUI" style="display:none">
+  <h2>試板類型</h2>
+  <div class="seg" style="grid-template-columns:1fr 1fr" id="plateSeg"></div>
+  <h2>尺寸 (mm)</h2>
+  <div id="pdims"></div>
+  </div>
+  <button id="exportStep">匯出 STEP（精確 CAD）</button>
+  <button id="export" class="sec">匯出 STL（網格）</button>
+  <div id="laserBtns" style="display:none;margin-top:8px;gap:8px;grid-template-columns:1fr 1fr">
+    <button class="lb" id="expDxf">匯出 DXF</button><button class="lb" id="expSvg">匯出 SVG</button>
+  </div>
+  <div id="info"></div>
+</div>
+<div id="view"><div id="dim"></div>
+  <div id="vsw" style="display:none"><button data-v="3d">3D</button><button data-v="flat">平面拆解圖</button></div>
+  <div id="flat" style="display:none"></div></div>
+
+<script type="importmap">{"imports":{"three":"./vendor/three.module.js","three-mesh-bvh":"./vendor/three-mesh-bvh.js"}}</script>
+<script type="module">
+import * as THREE from 'three';
+import {OrbitControls} from './vendor/OrbitControls.js';
+import {STLExporter} from './vendor/STLExporter.js';
+import {mergeVertices} from './vendor/BufferGeometryUtils.js';
+import {Brush,Evaluator,SUBTRACTION} from './vendor/three-bvh-csg.js';
+
+const P={mode:'lamp',roof:'gable',print:'fdm',width:100,depth:100,wallH:20,wall:1.6,rise:25,ridge:60,
+ lampOn:true,lampShape:'circle',lampLayout:'grid',lampN:1,lampRows:1,lampPos:'center',lampD:24,lampX:0,lampZ:0,winW:14,winH:12,winSill:5,winRows:1,winGap:4,nFront:2,nBack:0,nLeft:1,nRight:1,
+ T:3,kerf:0.15,finger:8,sheetW:600,
+ plate:'brick',pw:80,ph:60,relief:0.8,pbase:1.5};
+const ROOFS={flat:'平頂',shed:'單斜',gable:'雙斜',hip:'四面斜'};
+const PLATES={brick:'磚紋貼皮',wood:'木紋貼皮',jp:'日式建築',us:'美式建築'};
+const LAMPSHAPE={circle:'圓形',square:'方形',hex:'六邊形'};
+const LAMPLAYOUT={grid:'矩形網格',honey:'蜂巢交錯'};
+const LAMPPOS={center:'中心',front:'偏前牆',back:'偏後牆',left:'偏左牆',right:'偏右牆',custom:'自訂偏移'};
+// 欄位：[key,label,min,max,step,group]；min==='chk' 勾選框；min==='sel' 下拉（max 為選項表）
+const FIELDS=[
+ ['#','外形尺寸 (mm)'],
+ ['width','寬 (X)',20,300,1],['depth','深 (Z)',20,300,1],['wallH','牆高（<3 = 平板）',0,100,0.5],
+ ['wall','壁厚',0.8,5,0.1],['rise','屋頂高度',0,100,0.5],['ridge','屋脊長度%',0,100,1],
+ ['#','窗戶／門（數量 0 = 不開；位置高度拉到 0 = 門）'],
+ ['winW','寬度',3,60,0.5],['winH','高度',3,60,0.5],['winSill','位置高度（0=門）',0,60,0.5],['winRows','上下層數',1,5,1],['winGap','層間距',1,30,0.5],
+ ['nFront','前牆 +Z 數量',0,5,1],['nBack','後牆 −Z 數量',0,5,1],
+ ['nLeft','左牆 −X 數量',0,5,1],['nRight','右牆 +X 數量',0,5,1],
+ ['#','燈孔'],
+ ['lampOn','產生燈孔','chk'],['lampShape','形狀','sel',LAMPSHAPE],['lampLayout','排列','sel',LAMPLAYOUT],['lampN','每列數量',1,8,1],['lampRows','行數',1,6,1],['lampPos','位置','sel',LAMPPOS],['lampD','孔徑／邊長',1,120,0.5],
+ ['lampX','自訂偏移 X',-100,100,0.5],['lampZ','自訂偏移 Z',-100,100,0.5],
+ ['#','雷射切割（板材）','laser'],
+ ['T','板厚',1.5,10,0.5,'laser'],['kerf','刀縫補償',0,0.5,0.01,'laser'],
+ ['finger','指接齒寬',4,20,0.5,'laser'],['sheetW','板材寬度',100,1200,10,'laser']];
+const PFIELDS=[
+ ['pw','寬 (X)',30,200,1],['ph','高 (Y)',30,200,1],
+ ['relief','浮雕深度',0.3,2,0.05],['pbase','底板厚度',0.8,5,0.1]];
+
+// ---------- UI ----------
+const seg=(id,map,key)=>{const el=document.getElementById(id);
+ for(const k in map){const b=document.createElement('button');b.textContent=map[k];b.onclick=()=>{P[key]=k;sync();};b.dataset.k=k;el.appendChild(b);}};
+seg('roofSeg',ROOFS,'roof');seg('printSeg',{fdm:'FDM',resin:'光固化',laser:'雷射切割'},'print');
+seg('modeSeg',{lamp:'屋頂燈罩',plate:'表面試板'},'mode');seg('plateSeg',PLATES,'plate');
+function addFields(el,fields){
+ for(const [k,label,min,max,step,grp] of fields){
+  if(k==='#'){const h=document.createElement('h2');h.textContent=label;if(min)h.dataset.grp=min;el.appendChild(h);continue;}
+  const r=document.createElement('div');r.className='row';
+  if(min==='chk'){
+   r.innerHTML=`<label>${label}</label><input type="checkbox" style="justify-self:start;width:18px;height:18px;accent-color:var(--cy)">`;
+   const c=r.children[1];c.checked=P[k];c.onchange=()=>{P[k]=c.checked;sync();};
+  }else if(min==='sel'){
+   r.innerHTML=`<label>${label}</label><select>${Object.entries(max).map(([v,t])=>`<option value="${v}">${t}</option>`).join('')}</select>`;
+   const s=r.children[1];s.value=P[k];s.onchange=()=>{P[k]=s.value;sync();};
+  }else{
+   r.innerHTML=`<label>${label}</label><input type="range" min="${min}" max="${max}" step="${step}"><input type="number" min="${min}" max="${max}" step="${step}">`;
+   const [,s,n]=r.children;s.value=n.value=P[k];
+   const set=v=>{v=Math.min(max,Math.max(min,+v||min));P[k]=v;s.value=n.value=v;sync(true);};
+   s.oninput=()=>set(s.value);n.onchange=()=>set(n.value);
+  }
+  r.dataset.k=k;if(grp)r.dataset.grp=grp;el.appendChild(r);}
+}
+const dimsEl=document.getElementById('dims');
+addFields(dimsEl,FIELDS);addFields(document.getElementById('pdims'),PFIELDS);
+
+// ---------- 共用幾何參數（建構座標：脊線沿 Z，W 為短邊）----------
+function gp(p){
+ const {width:w,depth:d,wallH:H,wall:t}=p;
+ const rise=p.roof==='flat'?0:p.rise;
+ const swap=w>d; const W=swap?d:w, D=swap?w:d;
+ const slopeRun=p.roof==='shed'?W:W/2;
+ const sl=rise/slopeRun, v=t*Math.sqrt(1+sl*sl); // 內側垂直位移
+ const ridgeLen=p.roof==='gable'?D:Math.max(0,(D-W)*p.ridge/100);
+ const topY=(x,z,inner)=>{
+  let y;
+  if(p.roof==='flat')y=H;
+  else if(p.roof==='shed')y=H+rise*(1-(x+W/2)/W);
+  else if(p.roof==='gable')y=H+rise*(1-Math.abs(x)/(W/2));
+  else{ // hip: 以屋脊線段距離決定高度
+   const hz=ridgeLen/2, dz=Math.max(0,Math.abs(z)-hz);
+   const dx=Math.abs(x), edge=Math.max(dx*(1)/(W/2),dz/((D-ridgeLen)/2||1));
+   y=H+rise*(1-Math.min(1,edge));}
+  return inner?y-v:y;};
+ return {W,D,swap,rise,sl,v,ridgeLen,H,topY};
+}
+// 窗戶排列（3D 與雷射共用）：回傳每扇窗的中心與寬度
+function winLayout(L,t,n,ww0){
+ if(!n)return [];
+ const span=L-2*t, ww=Math.min(ww0,(span-(n+1)*3)/n);
+ if(ww<2)return [];
+ const gap=(span-n*ww)/(n+1),out=[];
+ for(let i=0;i<n;i++)out.push({c:-span/2+gap*(i+1)+ww*i+ww/2,w:ww});
+ return out;
+}
+
+// ---------- geometry ----------
+// 凸多面體：輸入多邊形（點陣列），依「朝外」自動校正繞向
+function build(p){
+ if(p.plateMode){ // 牆高 < 3mm：平板（厚度 = 壁厚）
+  const g=new THREE.BoxGeometry(p.width,p.wall,p.depth).toNonIndexed();g.deleteAttribute('uv');g.translate(0,p.wall/2,0);
+  return {g,slopeDeg:0};}
+ const {wall:t}=p;
+ const {W,D,swap,sl,v,ridgeLen,topY}=gp(p);
+ const solid=(hw,hd,inner)=>{ // 回傳多邊形清單
+  const X=[-hw,hw],Z=[-hd,hd];
+  const base=(x,z)=>[x,0,z], top=(x,z)=>[x,topY(x,z,inner),z];
+  const polys=[];
+  const rp=(x,z)=>top(x,z);
+  let ridge=null;
+  if(p.roof==='gable') ridge=[[0,-hd],[0,hd]];
+  else if(p.roof==='hip'){const hz=Math.min(hd,ridgeLen/2);ridge=[[0,-hz],[0,hz]];}
+  const c=[[X[0],Z[0]],[X[1],Z[0]],[X[1],Z[1]],[X[0],Z[1]]]; // A B C D
+  // 四面牆
+  for(let i=0;i<4;i++){const a=c[i],b=c[(i+1)%4];
+   const poly=[base(...a),base(...b),top(...b)];
+   const midTop=[];
+   // 山牆：前後牆（z 邊）加屋脊點
+   if(ridge&&(p.roof==='gable')&&a[1]===b[1]){const rz=a[1]<0?ridge[0]:ridge[1];poly.push(top(rz[0],rz[1]));}
+   poly.push(top(...a));polys.push(poly);}
+  // 屋頂面
+  if(p.roof==='flat'||p.roof==='shed'){polys.push(c.map(q=>top(...q)));}
+  else if(p.roof==='gable'){
+   polys.push([top(X[0],Z[0]),top(X[0],Z[1]),top(0,Z[1]),top(0,Z[0])]);
+   polys.push([top(X[1],Z[0]),top(0,Z[0]),top(0,Z[1]),top(X[1],Z[1])]);}
+  else{
+   const [r0,r1]=ridge;
+   polys.push([top(X[0],Z[0]),top(X[0],Z[1]),top(...r1),top(...r0)]);
+   polys.push([top(X[1],Z[0]),top(...r0),top(...r1),top(X[1],Z[1])]);
+   polys.push([top(X[0],Z[0]),top(...r0),top(X[1],Z[0])]);
+   polys.push([top(X[0],Z[1]),top(X[1],Z[1]),top(...r1)]);}
+  return polys;};
+ const hw=W/2,hd=D/2;
+ const outer=solid(hw,hd,false), inner=solid(hw-t,hd-t,true);
+ const center=(ps)=>{const a=[0,0,0];let n=0;ps.forEach(q=>q.forEach(x=>{a[0]+=x[0];a[1]+=x[1];a[2]+=x[2];n++}));return a.map(x=>x/n);};
+ const tris=[];
+ const emit=(poly,ctr,flip)=>{ // 依質心校正朝外
+  let nx=0,ny=0,nz=0;
+  for(let i=0;i<poly.length;i++){const a=poly[i],b=poly[(i+1)%poly.length];
+   nx+=(a[1]-b[1])*(a[2]+b[2]);ny+=(a[2]-b[2])*(a[0]+b[0]);nz+=(a[0]-b[0])*(a[1]+b[1]);}
+  const pc=center([poly]);
+  const out=nx*(pc[0]-ctr[0])+ny*(pc[1]-ctr[1])+nz*(pc[2]-ctr[2])>0;
+  let q=out?poly:[...poly].reverse();
+  if(flip)q=[...q].reverse();
+  for(let i=1;i<q.length-1;i++)tris.push(...q[0],...q[i],...q[i+1]);};
+ const oc=center(outer),ic=center(inner);
+ outer.forEach(q=>emit(q,oc,false));
+ inner.forEach(q=>emit(q,ic,true));
+ // 底部環
+ const oo=[[-hw,-hd],[hw,-hd],[hw,hd],[-hw,hd]],ii=[[-hw+t,-hd+t],[hw-t,-hd+t],[hw-t,hd-t],[-hw+t,hd-t]];
+ for(let i=0;i<4;i++){const j=(i+1)%4;
+  const q=[[...oo[i]],[...oo[j]],[...ii[j]],[...ii[i]]].map(a=>[a[0],0,a[1]]);
+  const n=[0,-1,0];
+  // 校正為朝下
+  const e1=[q[1][0]-q[0][0],0,q[1][2]-q[0][2]],e2=[q[2][0]-q[0][0],0,q[2][2]-q[0][2]];
+  const ny=e1[2]*e2[0]-e1[0]*e2[2];
+  const qq=ny<0?q:[...q].reverse();
+  tris.push(...qq[0],...qq[1],...qq[2],...qq[0],...qq[2],...qq[3]);}
+ const g=new THREE.BufferGeometry();
+ g.setAttribute('position',new THREE.Float32BufferAttribute(tris,3));
+ g.computeVertexNormals();
+ if(swap)g.rotateY(Math.PI/2);
+ return {g,slopeDeg:Math.atan(sl)*180/Math.PI,v};
+}
+
+// 燈孔位置（共用）：回傳 {x,z,d}（網頁 3D 座標），未啟用回傳 null
+// 窗戶層數：由下往上堆疊，層距 winGap；放不下時自動縮小窗高。回傳 [{y0,y1,door}]
+function winRows(p){
+ const H=p.wallH,n=Math.max(1,Math.round(p.winRows)),gap=p.winGap;
+ const sill=Math.min(p.winSill,Math.max(0,H-4));
+ const wh=Math.max(1.5,Math.min(p.winH,(H-sill-1.5-(n-1)*gap)/n));
+ const out=[];
+ for(let i=0;i<n;i++){const y0=sill+i*(wh+gap),y1=y0+wh;if(y1>H-1.5+1e-6)break;out.push({y0,y1,door:i===0&&sill<=0.01});}
+ return out;
+}
+const SQ3=Math.sqrt(3);
+// 燈孔陣列：grid=矩形網格（沿長邊/短邊等距）；honey=蜂巢交錯（奇數行錯半格、緊密貼合，孔間牆 1.6mm）
+// 六邊形的 d = 對邊距離（平邊朝向同列鄰居，尖角朝向行方向）；方形 d = 邊長；圓形 d = 直徑
+function lampGrid(o){
+ const {n,m,span,spanS,shape,layout}=o,vext=shape==='hex'?2/SQ3:1,hon=layout==='honey',gap=1.6,pts=[];
+ let d;
+ if(hon){
+  const rk=shape==='square'?1:SQ3/2,h=m>1?0.5:0,k=(m-1)*rk;
+  d=Math.min(o.dReq,(span-2-(n-1+h)*gap)/(n+h),(spanS-2-k*gap)/(k+vext));
+  const pa=d+gap,pb=pa*rk;
+  for(let j=0;j<m;j++)for(let i=0;i<n;i++)pts.push({a:(i-(n-1)/2)*pa+(j%2?pa/2:0)-(m>1?pa/4:0),c:(j-(m-1)/2)*pb});
+ }else{
+  d=Math.min(o.dReq,(spanS-2)/vext,span-2,n>1?span/n-3:1e9,m>1?(spanS/m-3)/vext:1e9);
+  for(let j=0;j<m;j++)for(let i=0;i<n;i++)pts.push({a:n===1?0:-span/2+span*(i+0.5)/n,c:m===1?0:-spanS/2+spanS*(j+0.5)/m});
+ }
+ return {d,pts};
+}
+function lampList(p){
+ if(!p.lampOn||p.lampD<=0)return [];
+ const t=p.wall,n=Math.max(1,Math.round(p.lampN)),m=Math.max(1,Math.round(p.lampRows));
+ const alongX=p.width>=p.depth,L=alongX?p.width:p.depth,S=alongX?p.depth:p.width;
+ const shape=p.lampShape||'circle',layout=p.lampLayout||'grid';
+ const g=lampGrid({n,m,span:L-2*t,spanS:S-2*t,dReq:p.lampD,shape,layout});
+ const d=g.d; if(d<=1)return [];
+ const ax=Math.max(0,(p.width-2*t-d)/2),az=Math.max(0,(p.depth-2*t-d)/2);
+ const b=({center:[0,0],front:[0,.6*az],back:[0,-.6*az],left:[-.6*ax,0],right:[.6*ax,0]})[p.lampPos]||[p.lampX,p.lampZ];
+ const single=layout!=='honey'||(n===1&&m===1);
+ return g.pts.map(q=>{let a=q.a,c=q.c;
+  if(single){if(n===1)a=alongX?b[0]:b[1];if(m===1)c=alongX?b[1]:b[0];}
+  return alongX?{x:a,z:c,d,shape,rot:0}:{x:c,z:a,d,shape,rot:90};});
+}
+// 雷射平面圖用：把孔轉成圓或多邊形（板面座標）
+function lampShape2D(shape,x,y,d,rot){
+ if(shape==='square')return {poly:rectPoly(x,y,d,d)};
+ if(shape==='hex'){const R=d/SQ3,off=rot?0:Math.PI/2;return {poly:[0,1,2,3,4,5].map(k=>[x+R*Math.cos(off+k*Math.PI/3),y+R*Math.sin(off+k*Math.PI/3)])};}
+ return {circle:{x,y,r:d/2}};
+}
+
+// ---------- 雷射切割：平面拆解 ----------
+const area2=pts=>pts.reduce((s,a,i)=>{const b=pts[(i+1)%pts.length];return s+(a[0]*b[1]-b[0]*a[1]);},0)/2;
+function cleanPoly(pts){
+ const o=[];for(const q of pts){const l=o[o.length-1];if(!l||Math.hypot(q[0]-l[0],q[1]-l[1])>1e-6)o.push(q);}
+ if(o.length>1&&Math.hypot(o[0][0]-o[o.length-1][0],o[0][1]-o[o.length-1][1])<1e-6)o.pop();
+ const r=[];
+ for(let i=0;i<o.length;i++){const a=o[(i+o.length-1)%o.length],b=o[i],c=o[(i+1)%o.length];
+  if(Math.abs((b[0]-a[0])*(c[1]-b[1])-(b[1]-a[1])*(c[0]-b[0]))>1e-6)r.push(b);}
+ return r;
+}
+function offsetPoly(pts,d){ // d>0 向外、d<0 向內
+ let P=cleanPoly(pts);if(area2(P)<0)P=P.reverse();
+ const n=P.length,out=[];
+ for(let i=0;i<n;i++){
+  const a=P[(i+n-1)%n],b=P[i],c=P[(i+1)%n];
+  const e1=[b[0]-a[0],b[1]-a[1]],e2=[c[0]-b[0],c[1]-b[1]];
+  const l1=Math.hypot(...e1),l2=Math.hypot(...e2);
+  const n1=[e1[1]/l1,-e1[0]/l1],n2=[e2[1]/l2,-e2[0]/l2];
+  const s=d/(1+n1[0]*n2[0]+n1[1]*n2[1]);
+  out.push([b[0]+(n1[0]+n2[0])*s,b[1]+(n1[1]+n2[1])*s]);}
+ return out;
+}
+const rectPoly=(cx,cy,w,h)=>[[cx-w/2,cy-h/2],[cx+w/2,cy-h/2],[cx+w/2,cy+h/2],[cx-w/2,cy+h/2]];
+
+function laserPanels(p){
+ const T=p.T,H=p.wallH,g=gp(p),panels=[];
+ if(p.plateMode){const hs=[],cs=[];for(const l of lampList(p)){const q=lampShape2D(l.shape,l.x,-l.z,l.d,l.rot);q.poly?hs.push(q.poly):cs.push(q.circle);}
+  return [{name:'平板',outer:rectPoly(0,0,p.width,p.depth),holes:hs,circles:cs}];}
+ const rows=winRows(p);
+ const LEN={front:p.width,back:p.width,left:p.depth,right:p.depth};
+ const CNT={front:p.nFront,back:p.nBack,left:p.nLeft,right:p.nRight};
+ const NAME={front:'前牆 +Z',back:'後牆 −Z',left:'左牆 −X',right:'右牆 +X'};
+ // A 型：指接時齒凸出的牆（矩形牆）；B 型：互補
+ const aSet=(p.roof==='gable'||p.roof==='shed')?(g.swap?['front','back']:['left','right']):['left','right'];
+ const segN=Math.max(1,2*Math.round((H/p.finger-1)/2)+1); // 奇數
+ for(const name of ['front','back','left','right']){
+  const L=LEN[name],A=aSet.includes(name);
+  const hf=u=>{let x,z;
+   if(name==='front'){x=u;z=p.depth/2}else if(name==='back'){x=-u;z=-p.depth/2}
+   else if(name==='left'){x=-p.width/2;z=u}else{x=p.width/2;z=-u}
+   const [xb,zb]=g.swap?[-z,x]:[x,z];
+   return g.topY(xb,zb,false);};
+  const xe=A?L/2:L/2-T;
+  const xs=i=>(A===(i%2===0))?L/2:L/2-T; // 第 i 段的邊緣位置
+  const right=[];
+  for(let i=0;i<segN;i++){right.push([xs(i),i*H/segN],[xs(i),(i+1)*H/segN]);}
+  const pts=[...right,[xe,H],[xe,hf(xe)]];
+  // 屋頂輪廓（右→左）取樣後化簡
+  const N=160;for(let i=1;i<N;i++){const u=xe-(2*xe)*i/N;pts.push([u,hf(u)]);}
+  pts.push([-xe,hf(-xe)],[-xe,H]);
+  for(let i=segN-1;i>=0;i--){pts.push([-xs(i),(i+1)*H/segN],[-xs(i),i*H/segN]);}
+  const wins=winLayout(L,T,CNT[name],p.winW);
+  const holes=[];
+  wins.sort((a,b)=>a.c-b.c);
+  for(const r of rows){
+   if(r.door){for(const {c,w} of wins)pts.push([c-w/2,0],[c-w/2,r.y1],[c+w/2,r.y1],[c+w/2,0]);} // 門：底邊缺口
+   else for(const {c,w} of wins)holes.push(rectPoly(c,(r.y0+r.y1)/2,w,r.y1-r.y0));
+  }
+  panels.push({name:NAME[name],outer:pts,holes,circles:[]});
+ }
+ // 屋頂板
+ const {W,D,rise,ridgeLen}=g;
+ const lps=lampList(p);
+ const tri=(b,h)=>[[-b/2,0],[b/2,0],[0,h]];
+ const trap=(b,t2,h)=>[[-b/2,0],[b/2,0],[t2/2,h],[-t2/2,h]];
+ const roofs=[];
+ if(p.roof==='flat')roofs.push({name:'屋頂板',outer:rectPoly(0,0,p.width,p.depth),w:p.width,h:p.depth,lps});
+ else if(p.roof==='shed'){const s=Math.hypot(W,rise);roofs.push({name:'屋頂板',outer:rectPoly(0,0,D,s),w:D,h:s,lx:0,ly:0});}
+ else if(p.roof==='gable'){const s=Math.hypot(W/2,rise);
+  for(const n of ['屋頂板 A','屋頂板 B'])roofs.push({name:n,outer:rectPoly(0,0,D,s),w:D,h:s,lx:0,ly:s/2*(n.endsWith('A')?1:0)-0});}
+ else{const s1=Math.hypot(W/2,rise),s2=Math.hypot((D-ridgeLen)/2,rise);
+  ['長邊坡 A','長邊坡 B'].forEach(n=>roofs.push({name:n,outer:trap(D,ridgeLen,s1),w:D,h:s1,lx:0,ly:s1/2}));
+  ['端坡 A','端坡 B'].forEach(n=>roofs.push({name:n,outer:tri(W,s2),w:W,h:s2,lx:0,ly:s2/3}));}
+ // 燈孔：平頂依偏移；斜屋頂開在面積最大的屋頂板中央
+ const big=[...roofs].sort((a,b)=>b.w*b.h-a.w*a.h)[0];
+ const nL=Math.max(1,Math.round(p.lampN)),mL=Math.max(1,Math.round(p.lampRows));
+ for(const r of roofs){
+  const circles=[],lh=[];
+  const add=(q)=>{q.poly?lh.push(q.poly):circles.push(q.circle);};
+  if(lps.length&&r===big){
+   if(p.roof==='flat')for(const l of lps)add(lampShape2D(l.shape,l.x,-l.z,l.d,l.rot));
+   else{ // 斜屋頂：在最大屋頂板中央，依同樣的形狀／排列規則開孔
+    const cy=r.name.startsWith('屋頂板')?0:r.ly;
+    const g=lampGrid({n:nL,m:mL,span:r.w-6,spanS:r.h-6,dReq:p.lampD,shape:p.lampShape||'circle',layout:p.lampLayout||'grid'});
+    if(g.d>1)for(const q of g.pts)add(lampShape2D(p.lampShape||'circle',q.a,cy+q.c,g.d,0));}
+  }
+  panels.push({name:r.name,outer:r.outer,holes:lh,circles});
+ }
+ return panels;
+}
+function layoutPanels(panels,sheetW,k){
+ const gap=5;
+ const items=panels.map(pn=>{
+  const outer=offsetPoly(pn.outer,k/2),holes=pn.holes.map(h=>offsetPoly(h,-k/2));
+  const circles=pn.circles.map(c=>({...c,r:c.r-k/2}));
+  const xs=outer.map(q=>q[0]),ys=outer.map(q=>q[1]);
+  const minx=Math.min(...xs),miny=Math.min(...ys);
+  return {name:pn.name,outer,holes,circles,minx,miny,w:Math.max(...xs)-minx,h:Math.max(...ys)-miny};});
+ items.sort((a,b)=>b.h-a.h);
+ const W=Math.max(sheetW,...items.map(i=>i.w+2*gap));
+ let x=gap,y=gap,rowH=0;
+ for(const it of items){
+  if(x+it.w+gap>W&&x>gap){x=gap;y+=rowH+gap;rowH=0;}
+  it.ox=x-it.minx;it.oy=y-it.miny;x+=it.w+gap;rowH=Math.max(rowH,it.h);}
+ for(const it of items){
+  const tr=q=>[q[0]+it.ox,q[1]+it.oy];
+  it.outer=it.outer.map(tr);it.holes=it.holes.map(h=>h.map(tr));
+  it.circles=it.circles.map(c=>({x:c.x+it.ox,y:c.y+it.oy,r:c.r}));}
+ return {items,W,H:y+rowH+gap};
+}
+function layoutSVG(lay,preview){
+ const f=y=>+(lay.H-y).toFixed(3),n=v=>+v.toFixed(3);
+ const path=pts=>'M'+pts.map(q=>`${n(q[0])} ${f(q[1])}`).join(' L')+' Z';
+ let s=`<svg xmlns="http://www.w3.org/2000/svg" ${preview?'':`width="${n(lay.W)}mm" height="${n(lay.H)}mm" `}viewBox="0 0 ${n(lay.W)} ${n(lay.H)}">`;
+ if(preview)s+=`<rect width="${n(lay.W)}" height="${n(lay.H)}" fill="#fff" stroke="#9aa" stroke-width="0.4" stroke-dasharray="3 2"/>`;
+ for(const it of lay.items){
+  s+=`<g fill="${preview?'#e8f4ff':'none'}" stroke="#f00" stroke-width="${preview?0.35:0.1}">`;
+  s+=`<path d="${path(it.outer)}"/>`;
+  for(const h of it.holes)s+=`<path d="${path(h)}" fill="${preview?'#fff':'none'}"/>`;
+  for(const c of it.circles)s+=`<circle cx="${n(c.x)}" cy="${f(c.y)}" r="${n(c.r)}" fill="${preview?'#fff':'none'}"/>`;
+  s+='</g>';
+  if(preview){const cx=it.outer.reduce((a,q)=>a+q[0],0)/it.outer.length,cy=it.outer.reduce((a,q)=>a+q[1],0)/it.outer.length;
+   s+=`<text x="${n(cx)}" y="${f(cy)}" font-size="4" text-anchor="middle" fill="#036">${it.name}</text><text x="${n(cx)}" y="${f(cy)+5}" font-size="3" text-anchor="middle" fill="#567">${n(it.w)}×${n(it.h)}</text>`;}
+ }
+ return s+'</svg>';
+}
+function layoutDXF(lay){
+ let s='0\nSECTION\n2\nHEADER\n9\n$INSUNITS\n70\n4\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n';
+ const line=(a,b)=>{s+=`0\nLINE\n8\nCUT\n10\n${a[0].toFixed(4)}\n20\n${a[1].toFixed(4)}\n11\n${b[0].toFixed(4)}\n21\n${b[1].toFixed(4)}\n`;};
+ const poly=pts=>pts.forEach((a,i)=>line(a,pts[(i+1)%pts.length]));
+ for(const it of lay.items){poly(it.outer);it.holes.forEach(poly);
+  for(const c of it.circles)s+=`0\nCIRCLE\n8\nCUT\n10\n${c.x.toFixed(4)}\n20\n${c.y.toFixed(4)}\n40\n${c.r.toFixed(4)}\n`;}
+ return s+'0\nENDSEC\n0\nEOF\n';
+}
+
+// ---------- 開孔（窗戶、燈孔）----------
+function cutHoles(g,p){
+ const t=p.wall,H=p.wallH,cut=[];
+ const top=p.plateMode?p.wall:H+(p.roof==='flat'?0:p.rise);
+ const rows=winRows(p);
+ const mk=(geo,x,y,z,ry=0)=>{const b=new Brush(geo);b.position.set(x,y,z);b.rotation.y=ry;b.updateMatrixWorld();return b;};
+ const walls=[['nFront',p.width,'z',1],['nBack',p.width,'z',-1],['nLeft',p.depth,'x',-1],['nRight',p.depth,'x',1]];
+ for(const [key,L,axis,sgn] of (p.plateMode?[]:walls)){
+  for(const {c,w:ww} of winLayout(L,t,p[key],p.winW))for(const r of rows){
+   const off=sgn*((axis==='z'?p.depth:p.width)/2);
+   const y0=r.door?-2:r.y0,hh=r.y1-y0,yc=(y0+r.y1)/2;
+   const geo=axis==='z'?new THREE.BoxGeometry(ww,hh,t*4):new THREE.BoxGeometry(t*4,hh,ww);
+   cut.push(axis==='z'?mk(geo,c,yc,off):mk(geo,off,yc,c));
+  }}
+ for(const lp of lampList(p)){
+  const geo=lp.shape==='square'?new THREE.BoxGeometry(lp.d,top*3,lp.d)
+   :lp.shape==='hex'?new THREE.CylinderGeometry(lp.d/Math.sqrt(3),lp.d/Math.sqrt(3),top*3,6)
+   :new THREE.CylinderGeometry(lp.d/2,lp.d/2,top*3,48);
+  cut.push(mk(geo,lp.x,top/2,lp.z,lp.rot*Math.PI/180));}
+ if(!cut.length)return g;
+ g.deleteAttribute('normal');
+ let base=mergeVertices(g,1e-4);base.computeVertexNormals();
+ const ev=new Evaluator();ev.attributes=['position','normal'];ev.useGroups=false;
+ let cur=new Brush(base);cur.updateMatrixWorld();
+ for(const c of cut){cur=ev.evaluate(cur,c,SUBTRACTION);cur.updateMatrixWorld();}
+ const out=cur.geometry;out.computeVertexNormals();return out;
+}
+
+// ---------- scene ----------
+const view=document.getElementById('view');
+const scene=new THREE.Scene();scene.background=new THREE.Color(0x0b0f17);
+const cam=new THREE.PerspectiveCamera(45,1,1,3000);cam.position.set(180,160,220);
+const ren=new THREE.WebGLRenderer({antialias:true});view.appendChild(ren.domElement);
+const ctl=new OrbitControls(cam,ren.domElement);ctl.target.set(0,20,0);
+scene.add(new THREE.HemisphereLight(0xffffff,0x223344,1.1));
+const dl=new THREE.DirectionalLight(0xffffff,1.2);dl.position.set(120,200,80);scene.add(dl);
+scene.add(new THREE.GridHelper(400,40,0x00e5ff,0x1f2a3d));
+const mat=new THREE.MeshStandardMaterial({color:0x0077d4,side:THREE.DoubleSide,roughness:.6});
+let mesh=null,edges=null,cur=null;
+function resize(){const r=view.getBoundingClientRect();ren.setSize(r.width,r.height);cam.aspect=r.width/r.height;cam.updateProjectionMatrix();}
+addEventListener('resize',resize);resize();
+
+// ---------- 表面試板（高度場浮雕）----------
+const sstep=(a,b,x)=>{const t=Math.min(1,Math.max(0,(x-a)/(b-a)));return t*t*(3-2*t);};
+const rnd2=(i,j)=>{const s=Math.sin(i*12.9898+j*78.233)*43758.5453;return s-Math.floor(s);};
+const vnoise=(x,y)=>{const xi=Math.floor(x),yi=Math.floor(y),xf=x-xi,yf=y-yi;
+ const a=rnd2(xi,yi),b=rnd2(xi+1,yi),c=rnd2(xi,yi+1),d=rnd2(xi+1,yi+1);
+ const u=xf*xf*(3-2*xf),v=yf*yf*(3-2*yf);return a+(b-a)*u+(c-a)*v+(a-b-c+d)*u*v;};
+const mod=(a,n)=>((a%n)+n)%n;
+const clamp01=v=>Math.min(1,Math.max(0,v));
+// 每個函式回傳 0~1（浮雕高度比例）；x 向右、y 向上（板面座標，mm）
+const HF={
+ brick(x,y){ // 1:12 紅磚 18×5.4mm、灰縫 1mm，略帶隨機高低與倒角
+  const L=18,Hb=5.4,m=1,r=Math.floor(y/(Hb+m)),xo=x+(r%2)*(L+m)/2,col=Math.floor(xo/(L+m));
+  const u=xo-col*(L+m),v=y-r*(Hb+m);
+  if(u<L&&v<Hb){const e=Math.min(u,L-u,v,Hb-v);
+   return clamp01((0.85+0.15*rnd2(col,r))*sstep(0,0.35,e)*(0.93+0.07*vnoise(x*1.7,y*1.7)));}
+  return 0.03*vnoise(x*2,y*2);},
+ wood(x,y,p){ // 橫向木板：板縫、端接縫、年輪流線、節疤
+  const pwid=12,r=Math.floor(y/pwid),v=y-r*pwid,seed=r*7.31;
+  const groove=1-sstep(0,0.5,Math.min(v,pwid-v));
+  const jl=55,jx=mod(x+rnd2(r,3)*jl,jl),jg=1-sstep(0,0.45,Math.min(jx,jl-jx));
+  let yy=y+2.2*vnoise(x*0.04+seed,y*0.2);
+  let knot=0;
+  if(rnd2(r,7)>0.35){
+   const kx=rnd2(r,5)*p.pw,ky=r*pwid+pwid*(0.3+0.4*rnd2(r,6)),dx=x-kx,dy=y-ky,d2=dx*dx+dy*dy;
+   yy+=dy/(Math.abs(dy)+1.5)*3.5*Math.exp(-d2/40);
+   knot=Math.exp(-d2/6)*(0.5+0.5*Math.sin(2*Math.PI*Math.sqrt(d2)/0.9));}
+  const g=0.5+0.5*Math.sin(2*Math.PI*yy*0.9),g2=0.5+0.5*Math.sin(2*Math.PI*(yy*2.3+x*0.02));
+  let h=0.5+0.30*g+0.10*g2+0.25*knot+0.05*(rnd2(r,1)-0.5);
+  h*=(1-0.85*groove)*(1-0.85*jg);
+  return clamp01(h);},
+ jp(x,y,p){ // 日式：瓦屋頂 / 木格子白壁 / 下見板
+  const t=p.ph-y,f=t/p.ph;
+  if(f<0.40){const rowH=7.5,P=6,r=Math.floor(t/rowH),v=t-r*rowH,xo=x+(r%2)*P/2;
+   const wave=0.5+0.5*Math.cos(2*Math.PI*xo/P),ramp=v/rowH;
+   return clamp01(0.2+0.3*ramp+0.5*wave*(0.3+0.7*ramp));}
+  if(f<0.43)return 1;
+  if(f<0.72){ // 白壁＋豎格子＋上下橫木
+   if(f<0.46||f>0.70)return 0.95;
+   const xm=mod(x,3.6);return xm<1.0?0.55+0.4*sstep(0,0.25,Math.min(xm,1.0-xm)):0.25;}
+  const bh=7.5,v=mod(t-0.72*p.ph,bh),ramp=v/bh;
+  let h=v>bh-0.5?0.08:0.2+0.8*Math.pow(ramp,1.2)*0.85;
+  const xm=mod(x,22);if(xm<1.4)h=Math.max(h,0.95*sstep(0,0.3,Math.min(xm,1.4-xm)));
+  return clamp01(h);},
+ us(x,y,p){ // 美式：瀝青瓦 / 下見搭接板 / 直立板條，兩側轉角板
+  const t=p.ph-y,f=t/p.ph;
+  if(f<0.30){const rowH=5.5,r=Math.floor(t/rowH),v=t-r*rowH,xm=mod(x+(r%2)*6,13);
+   if(xm>12)return 0.08;
+   return clamp01(0.25+0.55*(v/rowH)+0.08*vnoise(x*1.3,y*1.3));}
+  if(x<4||x>p.pw-4)return 1;
+  if(f<0.32)return 1;
+  if(f<0.72){const bh=8,v=mod(t-0.32*p.ph,bh);
+   return v>bh-0.4?0.05:clamp01(0.15+0.85*Math.pow(v/bh,1.5));}
+  const xm=mod(x,15);
+  if(xm<2.5)return 0.5+0.5*sstep(0,0.3,Math.min(xm,2.5-xm));
+  if(xm<3.0)return 0.15;
+  return 0.45;}
+};
+function buildPlate(p){
+ const res=0.3,nx=Math.max(2,Math.round(p.pw/res)),ny=Math.max(2,Math.round(p.ph/res));
+ const dx=p.pw/nx,dy=p.ph/ny,hf=HF[p.plate];
+ const top=new Float32Array((nx+1)*(ny+1));
+ for(let j=0;j<=ny;j++)for(let i=0;i<=nx;i++)top[j*(nx+1)+i]=p.pbase+p.relief*hf(i*dx,j*dy,p);
+ const V=[],push=(a,b,c)=>V.push(...a,...b,...c);
+ const pt=(i,j,h)=>[i*dx-p.pw/2,h,-(j*dy-p.ph/2)];
+ const T=(i,j)=>pt(i,j,top[j*(nx+1)+i]),B=(i,j)=>pt(i,j,0);
+ for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){
+  push(T(i,j),T(i+1,j),T(i+1,j+1));push(T(i,j),T(i+1,j+1),T(i,j+1));
+  push(B(i,j),B(i+1,j+1),B(i+1,j));push(B(i,j),B(i,j+1),B(i+1,j+1));}
+ const quad=(a,b,c,d,out)=>{ // 依外向法線校正繞向
+  const e1=[b[0]-a[0],b[1]-a[1],b[2]-a[2]],e2=[c[0]-a[0],c[1]-a[1],c[2]-a[2]];
+  const n=[e1[1]*e2[2]-e1[2]*e2[1],e1[2]*e2[0]-e1[0]*e2[2],e1[0]*e2[1]-e1[1]*e2[0]];
+  if(n[0]*out[0]+n[1]*out[1]+n[2]*out[2]>=0){push(a,b,c);push(a,c,d);}else{push(a,c,b);push(a,d,c);}};
+ for(let j=0;j<ny;j++){
+  quad(T(0,j),T(0,j+1),B(0,j+1),B(0,j),[-1,0,0]);
+  quad(T(nx,j),T(nx,j+1),B(nx,j+1),B(nx,j),[1,0,0]);}
+ for(let i=0;i<nx;i++){
+  quad(T(i,0),T(i+1,0),B(i+1,0),B(i,0),[0,0,1]);
+  quad(T(i,ny),T(i+1,ny),B(i+1,ny),B(i,ny),[0,0,-1]);}
+ const g=new THREE.BufferGeometry();
+ g.setAttribute('position',new THREE.Float32BufferAttribute(V,3));
+ g.computeVertexNormals();return g;
+}
+
+// ---------- 同步畫面 ----------
+const hasBackend=['localhost','127.0.0.1'].includes(location.hostname); // 線上版（GitHub Pages）沒有 STEP 後端
+let lay=null,lastPrint=null,viewMode='3d',lastMode=null,curP=P;
+function setView(m){viewMode=m;
+ document.getElementById('flat').style.display=m==='flat'?'block':'none';
+ ren.domElement.style.display=m==='flat'?'none':'block';
+ document.querySelectorAll('#vsw button').forEach(b=>b.classList.toggle('on',b.dataset.v===m));}
+document.querySelectorAll('#vsw button').forEach(b=>b.onclick=()=>setView(b.dataset.v));
+
+function sync(){
+ document.querySelectorAll('.seg button').forEach(b=>{const k=b.dataset.k;b.classList.toggle('on',P.roof===k||P.print===k||P.mode===k||P.plate===k);});
+ const plateMode=P.mode==='plate';
+ document.getElementById('lampUI').style.display=plateMode?'none':'';
+ document.getElementById('plateUI').style.display=plateMode?'':'none';
+ if(mesh){scene.remove(mesh);if(edges)scene.remove(edges);mesh.geometry.dispose();edges=null;}
+ let info='';
+ if(plateMode){
+  curP=P;cur={g:buildPlate(P)};
+  mesh=new THREE.Mesh(cur.g,mat);scene.add(mesh);
+  document.getElementById('dim').textContent=`${P.pw} × ${P.ph} × ${(P.pbase+P.relief).toFixed(2)} mm`;
+  info=P.plate==='brick'?'磚紋：磚 18×5.4mm、灰縫 1mm，磚面高低有隨機差異並倒角。\n✅ 可匯出 STEP（每塊磚為精確方塊）。'
+   :'⚠️ 此紋理是連續曲面浮雕，只能匯出 STL（網格）。\n建議列印：層高 0.12~0.16、噴嘴 0.4、平躺列印（浮雕面朝上）。';
+  info+='\n解析度 0.3mm；浮雕深度 0.8mm 以上較明顯。';
+  setView('3d');
+  document.getElementById('vsw').style.display='none';
+  document.getElementById('laserBtns').style.display='none';
+  document.getElementById('export').style.display='';
+  document.getElementById('exportStep').style.display=hasBackend?'':'none';
+  document.getElementById('info').textContent=info;
+  if(lastMode!=='plate'){cam.position.set(0,90,110);ctl.target.set(0,0,0);}
+  lastMode='plate';return;
+ }
+ if(lastMode==='plate'){cam.position.set(180,160,220);ctl.target.set(0,20,0);}
+ lastMode='lamp';
+ const flat=P.roof==='flat',laser=P.print==='laser';
+ dimsEl.querySelectorAll('[data-k],h2').forEach(el=>{const k=el.dataset.k;let show=true;
+  if(el.dataset.grp==='laser')show=laser;
+  if(k==='wall')show=!laser;if(k==='rise')show=!flat;if(k==='ridge')show=P.roof==='hip';
+  if(k==='winGap')show=P.winRows>1;if(k==='lampShape'||k==='lampLayout'||k==='lampPos'||k==='lampD'||k==='lampN'||k==='lampRows')show=P.lampOn;
+  if(k==='lampX'||k==='lampZ')show=P.lampOn&&P.lampPos==='custom';
+  el.style.display=show?'':'none';});
+ const Pe={...P,...(laser?{wall:P.T}:{}),plateMode:P.wallH<3}; // 雷射：壁厚=板厚；牆高<3：平板
+ curP=Pe;
+ cur=build(Pe);
+ try{cur.g=cutHoles(cur.g,Pe);}catch(e){console.error(e);}
+ mesh=new THREE.Mesh(cur.g,mat);
+ edges=new THREE.LineSegments(new THREE.EdgesGeometry(cur.g,25),new THREE.LineBasicMaterial({color:0x00e5ff}));
+ scene.add(mesh,edges);
+ const totalH=Pe.plateMode?Pe.wall:P.wallH+(flat?0:P.rise);
+ document.getElementById('dim').textContent=`${P.width} × ${P.depth} × ${totalH.toFixed(1)} mm`;
+ const tips=[];
+ if(Pe.plateMode)tips.push(`▭ 牆高 < 3mm：已轉為平板（${Pe.width}×${Pe.depth}×${Pe.wall}mm），窗／門／屋頂高度不適用，燈孔仍有效`);
+ if(flat)tips.push(`平頂：內天花需架橋 ${Math.min(P.width,P.depth)}mm，FDM 建議 ≤ 80mm`);
+ else if(cur.slopeDeg<40)tips.push(`⚠️ 屋頂傾角 ${cur.slopeDeg.toFixed(0)}°（<40°），內側天花會懸空`);
+ else tips.push(`✅ 屋頂傾角 ${cur.slopeDeg.toFixed(0)}°，開口朝下免支撐`);
+ if(P.winRows>1&&winRows(P).length<P.winRows)tips.push('⚠️ 牆高不足，上下層放不下，已自動縮小窗高／減少層數');
+ if(P.winSill<=0.01&&(P.nFront+P.nBack+P.nLeft+P.nRight)>0)tips.push('🚪 位置高度 = 0：已自動變成「門」（開口直達底邊）');
+ if(!laser&&P.wall<1.2)tips.push('⚠️ 壁厚 <1.2mm，FDM 容易太薄、透光不均');
+ if(P.print==='fdm')tips.push('FDM：開口貼熱床（z=0），不需支撐。\n透光：壁厚 1.2~2mm、白色/半透明料、少填充。\n✅ 建議匯出 STEP，切片軟體可用更細的曲面精度。');
+ else if(P.print==='resin')tips.push('光固化：建議傾斜 30~45° 擺放，在最高點加排液孔。\n壁厚 ≥1.2mm，平頂大面積易吸附變形。');
+ info=tips.join('\n');
+ lay=null;
+ if(laser){
+  try{lay=layoutPanels(laserPanels(Pe),P.sheetW,P.kerf);}catch(e){console.error(e);}
+  if(lay){
+   document.getElementById('flat').innerHTML=layoutSVG(lay,true);
+   info=`零件 ${lay.items.length} 片｜板材 ${lay.W.toFixed(0)} × ${lay.H.toFixed(0)} mm（板厚 ${P.T}）\n`+
+    lay.items.map(i=>`・${i.name}  ${i.w.toFixed(1)}×${i.h.toFixed(1)}`).join('\n')+
+    '\n\n牆體四角為指接；屋頂板與牆為膠合（斜角未斜切）。\n斜屋頂的燈孔開在最大那片屋頂板中央。\n門為底邊缺口。\n紅線 = 切割線；刀縫補償已套入輪廓。';}
+ }
+ if(laser&&lastPrint!=='laser')setView('flat');
+ if(!laser)setView('3d');
+ lastPrint=P.print;
+ document.getElementById('vsw').style.display=laser?'flex':'none';
+ document.getElementById('laserBtns').style.display=laser?'grid':'none';
+ document.getElementById('export').style.display=laser?'none':'';
+ document.getElementById('exportStep').style.display=(laser||!hasBackend)?'none':'';
+ document.getElementById('info').textContent=info;
+}
+const saveFile=(name,data,type)=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([data],{type}));a.download=name;a.click();};
+document.getElementById('expDxf').onclick=()=>lay&&saveFile(`RoofLamp_${P.roof}_${P.width}x${P.depth}_T${P.T}.dxf`,layoutDXF(lay),'application/dxf');
+document.getElementById('expSvg').onclick=()=>lay&&saveFile(`RoofLamp_${P.roof}_${P.width}x${P.depth}_T${P.T}.svg`,layoutSVG(lay,false),'image/svg+xml');
+
+document.getElementById('export').onclick=()=>{
+ const g=cur.g.clone();g.rotateX(Math.PI/2); // Y-up → Z-up，開口貼床
+ const buf=new STLExporter().parse(new THREE.Mesh(g),{binary:true});
+ saveFile(P.mode==='plate'?`Plate_${P.plate}_${P.pw}x${P.ph}.stl`:`RoofLamp_${P.roof}_${P.width}x${P.depth}.stl`,buf,'model/stl');
+};
+document.getElementById('exportStep').onclick=async()=>{
+ const infoEl=document.getElementById('info'),old=infoEl.textContent;
+ let body,name;
+ if(P.mode==='plate'){
+  if(P.plate!=='brick'){alert('此紋理是連續曲面浮雕，無法輸出精確 STEP，請改用 STL。');return;}
+  body={kind:'brick',p:{pw:P.pw,ph:P.ph,relief:P.relief,pbase:P.pbase}};name=`Plate_brick_${P.pw}x${P.ph}.step`;
+ }else{body={kind:'lamp',p:curP};name=`RoofLamp_${P.roof}_${P.width}x${P.depth}.step`;}
+ infoEl.textContent='⏳ 產生 STEP 中…（約 3~10 秒）';
+ try{
+  const r=await fetch('/step',{method:'POST',body:JSON.stringify(body)});
+  if(!r.ok)throw new Error(await r.text());
+  saveFile(name,await r.blob(),'application/step');infoEl.textContent='✅ 已匯出 '+name+'\n\n'+old;
+ }catch(e){infoEl.textContent='❌ STEP 產生失敗：'+e.message+'\n（請用「啟動 RoofLamp.command」開啟，才有 STEP 後端）\n\n'+old;}
+};
+
+sync();
+(function loop(){requestAnimationFrame(loop);ctl.update();ren.render(scene,cam);})();
+</script>
+</body>
+</html>
