@@ -1,6 +1,11 @@
-# RoofLamp 屋頂燈罩生成器
+# 冠名盒子微縮生成器 / Named Box Miniature Generator
 
 微縮場景屋頂燈罩的參數化生成器（瀏覽器），支援 FDM／光固化／雷射切割。
+
+> **English:** A browser-based parametric generator for miniature-scene roof lampshades (shallow box + roof).
+> - Roofs: flat, shed, gable, hip; windows/doors (multi-row); lamp holes (round / square / hexagon, grid / honeycomb)
+> - Output: STEP (exact CAD, local backend only), STL, laser-cut flat patterns (DXF / SVG), surface test plates (brick / wood / Japanese / American)
+> - Online version (GitHub Pages) is front-end only: no STEP. Run `server.py` locally for STEP.
 
 - 屋頂：平頂、單斜、雙斜、四面斜；窗／門（可多層）、燈孔（圓／方／六邊形、網格／蜂巢）
 - 輸出：STEP（精確 CAD）、STL、雷射平面拆解圖（DXF／SVG）、表面試板（磚／木／日式／美式）
